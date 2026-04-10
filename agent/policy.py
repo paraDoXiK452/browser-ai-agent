@@ -352,8 +352,19 @@ def text_matches_target(label: str, target: str) -> bool:
 
 
 def is_authorization_request(question: str) -> bool:
+    """True when the agent asks for unnecessary permission to do ordinary steps.
+    False (pass-through) when the agent legitimately asks for login, CAPTCHA, credentials, etc."""
     normalized = normalize_text(question)
-    patterns = (
+    legit_markers = (
+        "логин", "пароль", "password", "login", "email", "e-mail",
+        "captcha", "капча", "код подтвержд", "verification code",
+        "войти", "войдите", "войдёте", "вход", "авторизац",
+        "учетн", "учётн", "credential", "sign in", "log in",
+        "двухфакторн", "2fa", "sms", "смс",
+    )
+    if any(marker in normalized for marker in legit_markers):
+        return False
+    permission_patterns = (
         "можно ",
         "можно ли",
         "разрешите",
@@ -365,7 +376,7 @@ def is_authorization_request(question: str) -> bool:
         "добавить в корзину",
         "открыть",
     )
-    return any(pattern in normalized for pattern in patterns)
+    return any(pattern in normalized for pattern in permission_patterns)
 
 
 def parse_evaluation(text: str) -> EvaluationResult:

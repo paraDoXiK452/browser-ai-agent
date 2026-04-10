@@ -118,6 +118,14 @@ def run_policy_evals() -> None:
     _assert(is_probable_restaurant_card("Вкусно и точка 4.5 40-50 мин"), "restaurant card detection failed")
     _assert(text_matches_target("Вкусно — и точка 4.5", "вкусно и точка"), "target text match failed")
     _assert(is_authorization_request("Можно искать и открыть Вкусно и точка в Яндекс Еде?"), "authorization request detection failed")
+    _assert(
+        not is_authorization_request("Я открыл форму входа. Мне нужен ваш логин/почта Яндекса, чтобы продолжить."),
+        "login request should NOT be rejected as authorization request",
+    )
+    _assert(
+        not is_authorization_request("На экране CAPTCHA. Пройдите её вручную и нажмите Enter."),
+        "CAPTCHA request should NOT be rejected as authorization request",
+    )
     delivery_result = EvaluationResult(
         status="OK",
         checkpoint_state="COMPLETE",

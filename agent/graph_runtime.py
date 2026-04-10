@@ -950,6 +950,18 @@ async def _process_function_call(fc: Any, state: AgentState, deps: AgentDeps, do
         return False, "", done_verified, f"User replied: {answer}"
     if name == "done":
         msg = args.get("message", "(task complete)")
+        current_url = await deps.browser.current_url()
+        login_markers = ("passport", "login", "signin", "auth", "accounts.google", "account.live")
+        if any(marker in (current_url or "").lower() for marker in login_markers):
+            rejection = (
+                "done() REJECTED — you are on a login/authentication page. "
+                "The task cannot proceed without the user logging in. "
+                "Use ask_user() to tell the user: explain that you need them to log in manually in the browser, "
+                "then press Enter in the console when done. Do NOT call done() from a login page."
+            )
+            deps.memory.add("tool_result", rejection)
+            deps.log_event("done_rejected_login_page", message=msg, url=current_url)
+            return False, "", False, rejection
         if deps.memory.has_uncommitted_search():
             rejection = (
                 "done() rejected. A search-like field has a typed query that was not committed yet. "
