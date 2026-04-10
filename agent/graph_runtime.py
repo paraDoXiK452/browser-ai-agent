@@ -276,8 +276,22 @@ def _cart_exact_match(profile: TaskProfile, cart: dict[str, Any]) -> tuple[bool,
         if need > 0:
             return False, f"missing requested item in cart snapshot: {expected_name} x{expected_qty}"
     if remaining:
-        extra_names = [name for name, _ in remaining]
-        return False, f"cart contains extra items not requested by the user: {', '.join(extra_names[:3])}. Remove them before finishing."
+        _UI_NOISE = {
+            "далее", "назад", "оформить", "очистить", "корзина", "ваш заказ",
+            "оплатить", "итого", "доставка", "промокод", "закрыто",
+        }
+        real_extras = []
+        for name, _ in remaining:
+            low = name.lower().strip()
+            if low in _UI_NOISE:
+                continue
+            if any(low.startswith(p) for p in ("сейчас здесь", "в приложении", "минимальн", "стоимость доставк", "бесплатная доставк", "время доставк")):
+                continue
+            if len(low) <= 3:
+                continue
+            real_extras.append(name)
+        if real_extras:
+            return False, f"cart contains extra items not requested by the user: {', '.join(real_extras[:3])}. Remove them before finishing."
     return True, "all requested items matched in cart snapshot"
 
 
@@ -735,6 +749,12 @@ async def _build_graph(deps: AgentDeps):
         # Model produced no actions while evaluator already marked success — avoid burning steps/LLM $.
         stall_cap = max(1, int(os.getenv("STALL_FORCE_FINISH", "2").strip() or "2"))
         if state.get("consecutive_stalls", 0) >= stall_cap and _last_eval_signals_finish(deps.memory):
+            if state.get("finalize_retries", 0) >= 3:
+                deps.console.print(
+                    f"  [dim]Stall breaker: finalize retries exhausted ({state.get('finalize_retries', 0)}), finishing with best effort.[/dim]"
+                )
+                deps.log_event("stall_force_finish_exhausted", stalls=state.get("consecutive_stalls", 0))
+                return "finish"
             deps.console.print(
                 f"  [dim]Stall breaker: forcing done (stall ≥{stall_cap}, evaluator already ready_to_finish).[/dim]"
             )

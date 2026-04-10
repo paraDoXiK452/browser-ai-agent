@@ -390,8 +390,8 @@ class BrowserSession:
             const items = [];
             const hasLetters = (l) => /[A-Za-zА-Яа-яЁё]/.test(l);
             const isNoise = (l) => {
-              const low = l.toLowerCase();
-              return (
+              const low = l.toLowerCase().trim();
+              if (
                 low === 'cart' || low === 'your order' || low === 'your cart' ||
                 low === 'корзина' || low === 'ваш заказ' || low === 'ваша корзина' ||
                 low.includes('clear cart') || low.includes('очистить') ||
@@ -401,12 +401,23 @@ class BrowserSession:
                 low.includes('service fee') || low.includes('сервисн') ||
                 low.includes('shipping') || low.includes('tax') ||
                 low === 'total' || low === 'subtotal' ||
-                low === 'итого' || low.startsWith('итого') ||
-                // UI-only lines: bare prices, bare numbers, weight labels
-                /^\d+\s*[₽$€£¥]?$/.test(low) ||
-                /^\d+$/.test(low) ||
-                /^·?\s*\d+\s*[гgmlмл]$/.test(low)
-              );
+                low === 'итого' || low.startsWith('итого')
+              ) return true;
+              // UI chrome: buttons, status labels, app banners
+              const uiPatterns = [
+                'далее', 'назад', 'оформить', 'закрыто', 'сейчас здесь',
+                'в приложении', 'подборки', 'перейти', 'продолжить',
+                'минимальный заказ', 'бесплатная доставка', 'время доставки',
+                'add to cart', 'checkout', 'go to checkout', 'place order',
+                'continue', 'proceed', 'back', 'next', 'closed',
+                'стоимость доставки', 'минимальная сумма',
+              ];
+              if (uiPatterns.some(p => low === p || low.startsWith(p + ' ') || low.startsWith(p + ':'))) return true;
+              // Bare prices, bare numbers, weight labels
+              if (/^\d+\s*[₽$€£¥]?$/.test(low)) return true;
+              if (/^\d+$/.test(low)) return true;
+              if (/^·?\s*\d+\s*[гgmlмл]$/.test(low)) return true;
+              return false;
             };
             const hasRub = (l) => /₽/.test(l);
             const qtyFromLine = (l) => {
