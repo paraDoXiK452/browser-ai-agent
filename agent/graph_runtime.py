@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import traceback
 from dataclasses import dataclass
 from datetime import datetime
@@ -280,11 +281,13 @@ def _summarize_observation(raw: str, limit: int = 20) -> str:
     goal = str(data.get("goal", "")).strip()
     elements = data.get("elements", [])
     lines: list[str] = []
+    all_labels: list[str] = []
     for item in elements[:limit]:
         label = str(item.get("label", "")).strip() or "(no label)"
         role = str(item.get("role", "")).strip() or "element"
         element_id = str(item.get("id", "")).strip()
         lines.append(f"- [{element_id}] {role}: {label}")
+        all_labels.append(label.lower())
     if not lines:
         return f"Live observation:\nURL: {url or '-'}"
     header = "Live observation:"
@@ -295,6 +298,12 @@ def _summarize_observation(raw: str, limit: int = 20) -> str:
     header += f"\nShowing {len(lines)} of {len(elements)} interactive elements on screen."
     if len(elements) > limit:
         header += f" {len(elements) - limit} more elements available — scroll down or use page search to find items not listed."
+    goal_lower = goal.lower()
+    goal_tokens = [t for t in re.split(r"\s+", goal_lower) if len(t) >= 5]
+    if goal_tokens:
+        missing = [t for t in goal_tokens if not any(t in lab for lab in all_labels)]
+        if missing:
+            header += f"\nNOTE: No exact match for [{', '.join(missing)}] among visible elements. The target may require scrolling or using the page's search field."
     return f"{header}\n" + "\n".join(lines)
 
 
