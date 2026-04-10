@@ -846,7 +846,7 @@ async def _build_graph(deps: AgentDeps):
             "finish": "finish",
         },
     )
-    graph.add_conditional_edges("handle_computer", route_after_computer, {"evaluate": "evaluate", "finish": "finish"})
+    graph.add_conditional_edges("handle_computer", route_after_computer, {"evaluate": "evaluate", "classify": "classify", "finish": "finish"})
     graph.add_conditional_edges("evaluate", route_after_evaluate, {"recover": "recover", "classify": "classify", "finalize_success": "finalize_success", "finish": "finish"})
     graph.add_edge("recover", "start_executor")
     graph.add_edge("finalize_success", "finish")
