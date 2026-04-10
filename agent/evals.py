@@ -93,6 +93,20 @@ def run_policy_evals() -> None:
         ) == ["чикенбургер", "большую колу"],
         "requested entity extraction failed",
     )
+    _assert(
+        extract_target_restaurant(
+            "Зайди в яндекс еду и закажи во вкусно и точка 1 чизбургер",
+            task_kind="delivery",
+        ) == "вкусно и точка",
+        "target restaurant extraction failed for 'во вкусно и точка'",
+    )
+    _assert(
+        extract_requested_entities(
+            "Зайди в яндекс еду и закажи во вкусно и точка 1 чизбургер, добавь в корзину но не оплачивай товар",
+            task_kind="delivery",
+        ) == ["чизбургер"],
+        "requested entity extraction should not include restaurant name",
+    )
     profile = build_task_profile("В яндекс еде закажи мне чикенбургер и большую колу с вкусно и точка")
     _assert(profile.restaurant == "вкусно и точка", "task profile restaurant failed")
     _assert(infer_page_mode(current_url="https://eda.yandex.ru/r/vkusno", page_text="Найти в ресторане", flags={}) == "unknown", "generic page mode should return unknown")

@@ -122,15 +122,23 @@ def extract_requested_entities(task: str, *, task_kind: str) -> list[str]:
     normalized = normalize_text(task)
     entities: list[str] = []
     if task_kind == "delivery":
+        restaurant = extract_target_restaurant(task, task_kind=task_kind)
         patterns = [
-            r"(?:закажи|заказать|добавь|добавить)\s+мне\s+(.+?)(?:\s+из\s+|\s+с\s+|,| но |$)",
-            r"(?:закажи|заказать|добавь|добавить)\s+(.+?)(?:\s+из\s+|\s+с\s+|,| но |$)",
+            r"(?:закажи|заказать|добавь|добавить)\s+мне\s+(.+?)(?:\s+из\s+|\s+с\s+|,| но | на адрес|$)",
+            r"(?:закажи|заказать|добавь|добавить)\s+(.+?)(?:\s+из\s+|\s+с\s+|,| но | на адрес|$)",
         ]
         for pattern in patterns:
             match = re.search(pattern, normalized)
             if not match:
                 continue
             chunk = match.group(1).strip(" ,.")
+            if restaurant:
+                chunk = re.sub(
+                    r"(?:в|во|из|с)\s+" + re.escape(restaurant),
+                    "",
+                    chunk,
+                    flags=re.IGNORECASE,
+                ).strip(" ,.")
             parts = [part.strip(" ,.") for part in re.split(r"\s+и\s+|,", chunk) if part.strip(" ,.")]
             entities.extend(parts)
             break
@@ -139,10 +147,13 @@ def extract_requested_entities(task: str, *, task_kind: str) -> list[str]:
     for item in entities:
         if len(item) < 3:
             continue
-        if item in seen:
+        clean = re.sub(r"^\d+\s*", "", item).strip()
+        if not clean or len(clean) < 3:
             continue
-        seen.add(item)
-        deduped.append(item)
+        if clean in seen:
+            continue
+        seen.add(clean)
+        deduped.append(clean)
     return deduped
 
 
@@ -150,9 +161,11 @@ def extract_target_restaurant(task: str, *, task_kind: str) -> str:
     normalized = normalize_text(task)
     if task_kind != "delivery":
         return ""
+    _end = r"(?:,| но | на адрес| на указ| доставь| доставк| добавить| добавь| закаж| заказ| оформ| \d+ |$)"
     patterns = [
-        r"\b(?:с|из)\b\s+([a-zа-я0-9 .&\-—]+?)(?:,| но | на адрес| на указ| доставь| доставк| добавить| добавь| закаж| заказ| оформ|$)",
-        r"\bресторан[а-я\s]*\s+([a-zа-я0-9 .&\-—]+?)(?:,| но | на адрес| на указ| доставь| доставк| добавить| добавь| закаж| заказ| оформ|$)",
+        r"\b(?:с|из)\b\s+([a-zа-яё0-9 .&\-—]+?)" + _end,
+        r"(?:закажи|заказать|добавь|добавить)(?:\s+мне)?\s+(?:в|во)\s+([a-zа-яё0-9 .&\-—]+?)" + _end,
+        r"\bресторан[а-я\s]*\s+([a-zа-яё0-9 .&\-—]+?)" + _end,
     ]
     for pattern in patterns:
         match = re.search(pattern, normalized)
