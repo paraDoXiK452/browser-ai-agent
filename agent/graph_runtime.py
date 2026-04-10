@@ -156,7 +156,11 @@ def _last_eval_signals_finish(memory: TaskMemory) -> bool:
     if not memory.last_evaluation:
         return False
     result = parse_evaluation(memory.last_evaluation)
-    return result.status == "OK" and result.checkpoint_state == "COMPLETE" and result.has_flag("ready_to_finish")
+    if result.status == "OK" and result.checkpoint_state == "COMPLETE" and result.has_flag("ready_to_finish"):
+        return True
+    if result.status == "OK" and result.has_flag("cart_verified"):
+        return True
+    return False
 
 
 def _parse_page_state(raw: str) -> dict[str, Any]:
@@ -551,7 +555,7 @@ async def _build_graph(deps: AgentDeps):
             "screenshot_url": screenshot_url,
             "recent_actions": action_descs,
             "done_verified": done_verified,
-            "consecutive_stalls": 0,
+            "consecutive_stalls": 0 if not is_screenshot_only else state.get("consecutive_stalls", 0),
             "consecutive_screenshots": consecutive_screenshots,
         }
 
