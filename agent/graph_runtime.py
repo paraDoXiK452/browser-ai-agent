@@ -898,6 +898,18 @@ async def _process_function_call(fc: Any, state: AgentState, deps: AgentDeps, do
             deps.log_event("tool_rejected", name=name, reason=rejection, question=question)
             deps.console.print(f"  [yellow]-> {rejection[:120]}[/yellow]")
             return False, "", done_verified, rejection
+        q_lower = question.lower()
+        substitute_markers = ("оставить", "заменить", "вместо", "похож", "альтернатив", "другой вариант", "продолжить поиск")
+        if any(m in q_lower for m in substitute_markers) and deps.requested_entities:
+            rejection = (
+                "REJECTED. Do not ask whether to substitute or stop searching. The user requested specific items — "
+                "find the EXACT items. Use the page's search/filter or scroll to find them. "
+                "Do not offer alternatives unless the user explicitly says so."
+            )
+            deps.memory.add("tool_result", rejection)
+            deps.log_event("tool_rejected", name=name, reason="substitute_question", question=question)
+            deps.console.print(f"  [yellow]-> {rejection[:120]}[/yellow]")
+            return False, "", done_verified, rejection
         deps.console.print(Panel(question, title="Agent asks", border_style="yellow"))
         answer = Prompt.ask("[bold]Your answer[/bold]")
         deps.memory.add("user", answer)
