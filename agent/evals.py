@@ -9,6 +9,7 @@ from agent.policy import (
     address_tokens_visible,
     extract_address_tokens,
     extract_requested_entities,
+    extract_requested_entities_with_qty,
     extract_site_query,
     extract_target_restaurant,
     infer_task_domains,
@@ -197,6 +198,24 @@ def run_policy_evals() -> None:
     clean_cart = {"items": [{"name": "Чизбургер", "qty": 1}]}
     clean_ok, clean_reason = _cart_exact_match(extra_profile, clean_cart)
     _assert(clean_ok, f"clean cart should pass: {clean_reason}")
+
+    qty_entities = extract_requested_entities_with_qty(
+        "В яндекс еде закажи мне 2 чизбургера и большую колу с вкусно и точка",
+        task_kind="delivery",
+    )
+    qty_names = [name for name, _ in qty_entities]
+    qty_vals = {name: qty for name, qty in qty_entities}
+    _assert("чизбургера" in qty_names, f"qty entity extraction should find чизбургера: {qty_entities}")
+    _assert(qty_vals.get("чизбургера") == 2, f"qty should be 2 for чизбургера: {qty_entities}")
+    _assert(qty_vals.get("большую колу") == 1, f"qty should be 1 for большую колу: {qty_entities}")
+
+    qty_profile = build_task_profile("В яндекс еде закажи мне 2 чизбургера с вкусно и точка, добавь в корзину но не оплачивай")
+    qty_cart_ok = {"items": [{"name": "Чизбургера", "qty": 2}]}
+    qok, qreason = _cart_exact_match(qty_profile, qty_cart_ok)
+    _assert(qok, f"cart with qty=2 should pass: {qreason}")
+    qty_cart_fail = {"items": [{"name": "Чизбургера", "qty": 1}]}
+    qfail, qfreason = _cart_exact_match(qty_profile, qty_cart_fail)
+    _assert(not qfail, f"cart with qty=1 should fail for 2 requested: {qfreason}")
 
     addr_tokens = extract_address_tokens("В яндекс еда закажи мне чизбургер на адрес белоглазова 27")
     _assert("белоглазова" in addr_tokens and "27" in addr_tokens, f"address token extraction failed: {addr_tokens}")

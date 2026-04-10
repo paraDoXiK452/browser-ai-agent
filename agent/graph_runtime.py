@@ -6,7 +6,6 @@ import asyncio
 import json
 import os
 import re
-import traceback
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -28,6 +27,7 @@ from agent.policy import (
     classify_dead_end,
     address_tokens_visible,
     extract_requested_entities,
+    extract_requested_entities_with_qty,
     extract_site_query,
     infer_domain_from_url,
     infer_task_domains,
@@ -73,6 +73,7 @@ class AgentState(TypedDict, total=False):
     include_planner: bool
     finalize_retries: int
     finalize_rejected: bool
+    needs_hard_restart: bool
 
 
 @dataclass
@@ -130,12 +131,7 @@ def _normalize_domain(url: str) -> str:
 
 
 def _extract_domains(text: str) -> set[str]:
-    domains = set()
-    for token in text.replace("\n", " ").split():
-        token = token.strip(" ,;()[]<>\"'")
-        if "." in token and "://" not in token and "/" not in token:
-            domains.add(token.lower())
-    return domains
+    return infer_task_domains(text)
 
 
 def _current_checkpoint_is_last(memory: TaskMemory) -> bool:
@@ -228,6 +224,8 @@ def _normalize_item_label(text: str) -> str:
 
 
 def _expected_delivery_items(profile: TaskProfile) -> list[tuple[str, int]]:
+    if hasattr(profile, "_entities_with_qty") and profile._entities_with_qty:
+        return [((_normalize_item_label(name), qty)) for name, qty in profile._entities_with_qty if _normalize_item_label(name)]
     entities = profile.target_entities or profile.requested_entities
     result: list[tuple[str, int]] = []
     for entity in entities:
@@ -295,7 +293,7 @@ def _cart_exact_match(profile: TaskProfile, cart: dict[str, Any]) -> tuple[bool,
     return True, "all requested items matched in cart snapshot"
 
 
-def _summarize_observation(raw: str, limit: int = 20) -> str:
+def _summarize_observation(raw: str, limit: int = 20, *, target_entities: list[str] | None = None) -> str:
     try:
         data = json.loads(raw)
     except Exception:
@@ -305,12 +303,15 @@ def _summarize_observation(raw: str, limit: int = 20) -> str:
     elements = data.get("elements", [])
     lines: list[str] = []
     all_labels: list[str] = []
+    search_field_ids: list[str] = []
     for item in elements[:limit]:
         label = str(item.get("label", "")).strip() or "(no label)"
         role = str(item.get("role", "")).strip() or "element"
         element_id = str(item.get("id", "")).strip()
         lines.append(f"- [{element_id}] {role}: {label}")
         all_labels.append(label.lower())
+        if is_search_like_field(label, role):
+            search_field_ids.append(element_id)
     if not lines:
         return f"Live observation:\nURL: {url or '-'}"
     header = "Live observation:"
@@ -327,6 +328,13 @@ def _summarize_observation(raw: str, limit: int = 20) -> str:
         missing = [t for t in goal_tokens if not any(t in lab for lab in all_labels)]
         if missing:
             header += f"\nNOTE: No exact match for [{', '.join(missing)}] among visible elements. The target may require scrolling or using the page's search field."
+    if search_field_ids and target_entities:
+        entity_list = ", ".join(target_entities[:3])
+        header += (
+            f"\nSEARCH HINT: A search/filter field is visible (element {search_field_ids[0]}). "
+            f"You are looking for: [{entity_list}]. "
+            f"Use type_into_observed(element_id=\"{search_field_ids[0]}\", text=\"<item name>\") to search directly."
+        )
     return f"{header}\n" + "\n".join(lines)
 
 
@@ -381,6 +389,17 @@ async def _build_graph(deps: AgentDeps):
             return {}
 
         deps.console.print("  [dim]Opening initial page...[/dim]")
+
+        async def _auto_dismiss() -> None:
+            try:
+                dismiss_res = await deps.browser.dismiss_blockers()
+                if "Dismissed" in dismiss_res:
+                    deps.memory.add("tool_result", dismiss_res)
+                    deps.log_event("bootstrap_dismiss", result=dismiss_res)
+                    deps.console.print(f"  [green]-> {dismiss_res[:120]}[/green]")
+            except Exception:
+                pass
+
         if deps.task_domains:
             for domain in sorted(deps.task_domains):
                 target = f"https://{domain}"
@@ -389,6 +408,7 @@ async def _build_graph(deps: AgentDeps):
                 deps.log_event("bootstrap_navigate", url=target, result=result)
                 deps.console.print(f"  [green]-> {result[:120]}[/green]")
                 if "Navigation failed" not in result:
+                    await _auto_dismiss()
                     return {}
 
         query = extract_site_query(state["task"])
@@ -407,6 +427,7 @@ async def _build_graph(deps: AgentDeps):
                     deps.memory.add("tool_result", click_res)
                     deps.log_event("bootstrap_click_search_result", label=label, result=click_res)
                     deps.console.print(f"  [green]-> {click_res[:120]}[/green]")
+                    await _auto_dismiss()
                     break
         except Exception:
             pass
@@ -425,7 +446,7 @@ async def _build_graph(deps: AgentDeps):
             deps.log_event("page_state_error", error=str(exc))
         try:
             observation_raw = await deps.browser.observe(deps.memory.current_checkpoint() or state["task"])
-            observation = _summarize_observation(observation_raw)
+            observation = _summarize_observation(observation_raw, target_entities=deps.requested_entities)
             if observation:
                 deps.log_event("live_observation", observation=observation)
         except Exception as exc:
@@ -488,6 +509,27 @@ async def _build_graph(deps: AgentDeps):
         deps.memory.add("actions", ", ".join(action_descs))
         deps.log_event("computer_actions", step=step, actions=action_descs)
 
+        click_coords = [(int(a.x), int(a.y)) for a in actions if a.type == "click"]
+        for cx, cy in click_coords:
+            deps.memory.recent_click_coords.append((cx, cy))
+        deps.memory.recent_click_coords = deps.memory.recent_click_coords[-5:]
+        if not click_coords:
+            deps.memory.recent_click_coords.clear()
+        if len(deps.memory.recent_click_coords) >= 3:
+            last3 = deps.memory.recent_click_coords[-3:]
+            xs = [c[0] for c in last3]
+            ys = [c[1] for c in last3]
+            if max(xs) - min(xs) < 40 and max(ys) - min(ys) < 40:
+                deps.console.print("  [yellow]Repeated clicks on the same area detected. Injecting hint.[/yellow]")
+                deps.memory.update_progress(
+                    "WARNING: You have clicked the same area 3 times in a row with no visible change. "
+                    "This element may be non-interactive or already activated. "
+                    "Try a different approach: use observe() to find other interactive elements, scroll down, "
+                    "use the page's search/filter, or go_back()."
+                )
+                deps.log_event("repeated_click_detected", coords=last3)
+                deps.memory.recent_click_coords.clear()
+
         approved = True
         safety_checks = getattr(call, "pending_safety_checks", None)
         if safety_checks:
@@ -511,8 +553,13 @@ async def _build_graph(deps: AgentDeps):
                     approved = False
                     deps.console.print("  [yellow]-> REJECTED. Do not use browser shortcuts like Ctrl+L, Ctrl+F, Alt+D, or Ctrl+K inside an active web app.[/yellow]")
             if current_domain and current_domain not in {"google.com", "bing.com"} and getattr(a, "type", "") == "type":
-                text = str(getattr(a, "text", "")).lower()
-                if text.startswith(("http://", "https://", "www.")) or ".ru" in text or ".com" in text:
+                text = str(getattr(a, "text", "")).strip()
+                text_lower = text.lower()
+                looks_like_url = (
+                    text_lower.startswith(("http://", "https://", "www."))
+                    or re.match(r"^[a-z0-9][-a-z0-9]*\.[a-z]{2,6}(/|$)", text_lower)
+                )
+                if looks_like_url:
                     approved = False
                     deps.console.print("  [yellow]-> REJECTED. Do not type raw URLs or domains into ordinary page fields inside an active web app.[/yellow]")
 
@@ -525,7 +572,7 @@ async def _build_graph(deps: AgentDeps):
                 deps.console.print(f"  [red]Action error (continuing): {exc}[/red]")
 
         await deps.browser.close_extra_tabs()
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(0.3)
         screenshot_url = await deps.browser.screenshot()
         mixed_outputs: list[dict[str, Any]] = [{
             "type": "computer_call_output",
@@ -540,7 +587,7 @@ async def _build_graph(deps: AgentDeps):
             try:
                 goal = deps.memory.current_checkpoint() or state["task"]
                 obs_raw = await deps.browser.observe(goal)
-                obs_summary = _summarize_observation(obs_raw)
+                obs_summary = _summarize_observation(obs_raw, target_entities=deps.requested_entities)
                 if obs_summary:
                     deps.memory.add("tool_result", obs_summary)
                     deps.memory.update_progress(
@@ -556,8 +603,11 @@ async def _build_graph(deps: AgentDeps):
         completed_successfully = False
         finished_message = ""
         done_verified = state.get("done_verified", False)
+        cached_ps_for_fc = _parse_page_state(await deps.browser.inspect_state()) if function_calls else None
         for fc in function_calls:
-            should_return, finished_message, done_verified, output = await _process_function_call(fc, state, deps, done_verified, step)
+            should_return, finished_message, done_verified, output = await _process_function_call(
+                fc, state, deps, done_verified, step, cached_page_state=cached_ps_for_fc,
+            )
             mixed_outputs.append({"type": "function_call_output", "call_id": fc.call_id, "output": output})
             if should_return:
                 completed_successfully = True
@@ -595,8 +645,11 @@ async def _build_graph(deps: AgentDeps):
         step = state["step"] + 1
         outputs: list[dict[str, Any]] = []
         done_verified = state.get("done_verified", False)
+        cached_ps = _parse_page_state(await deps.browser.inspect_state())
         for fc in state.get("function_calls", []):
-            should_return, finished_message, done_verified, output = await _process_function_call(fc, state, deps, done_verified, step)
+            should_return, finished_message, done_verified, output = await _process_function_call(
+                fc, state, deps, done_verified, step, cached_page_state=cached_ps,
+            )
             outputs.append({"call_id": fc.call_id, "output": output})
             if should_return:
                 return {"step": step, "completed_successfully": True, "finished_message": finished_message, "done_verified": done_verified}
@@ -615,6 +668,7 @@ async def _build_graph(deps: AgentDeps):
     async def recover(state: AgentState) -> AgentState:
         result = state["evaluation"]
         current_url = await deps.browser.current_url()
+        needs_hard_restart = False
         page_state: dict[str, Any] = {}
         try:
             page_state = _parse_page_state(await deps.browser.inspect_state())
@@ -624,13 +678,10 @@ async def _build_graph(deps: AgentDeps):
         if result.has_flag("captcha"):
             deps.console.print(Panel("На странице видна CAPTCHA. Реши её вручную в браузере, затем нажми Enter здесь.", title="Manual Action Required", border_style="yellow"))
             Prompt.ask("[bold]Нажми Enter после решения CAPTCHA[/bold]", default="")
-            try:
-                pass
-            except EOFError:
-                return {"stop_reason": "Manual CAPTCHA action required, but stdin is unavailable."}
             deps.memory.add("user", "Solved CAPTCHA manually")
             deps.log_event("manual_captcha_solved")
-            return {"include_planner": False}
+            needs_hard_restart = True
+            return {"include_planner": False, "needs_hard_restart": needs_hard_restart}
         if page_state.get("flags", {}).get("cookie_banner") or page_state.get("flags", {}).get("modal_visible"):
             dismiss_result = await deps.browser.dismiss_blockers()
             deps.memory.add("tool_result", dismiss_result)
@@ -639,11 +690,12 @@ async def _build_graph(deps: AgentDeps):
                 deps.memory.update_progress(
                     "A visible blocker was dismissed. Continue from the same local app context before using back navigation."
                 )
-                return {"include_planner": False}
+                return {"include_planner": False, "needs_hard_restart": False}
         if classify_dead_end(result):
             note = f"Текущий checkpoint: {deps.memory.current_checkpoint()}. Ты попал в тупиковое состояние. Вернись к рабочему контенту через back/close/scroll и продолжай через локальный UI."
             deps.memory.update_progress(note)
             deps.log_event("dead_end_recovery", checkpoint=deps.memory.current_checkpoint(), note=note)
+            needs_hard_restart = True
         else:
             deps.memory.update_progress(result.correction or result.evidence or result.raw)
         if result.has_flag("wrong_item") and page_state.get("flags", {}).get("modal_visible"):
@@ -665,7 +717,7 @@ async def _build_graph(deps: AgentDeps):
                 "The item you clicked was NOT the correct one — do not pick similar-sounding alternatives. "
                 "Use the page's search/filter field to find the exact item, or scroll to discover more options."
             )
-            return {"include_planner": False}
+            return {"include_planner": False, "needs_hard_restart": False}
         if result.has_flag("wrong_destination") or result.has_flag("wrong_item") or result.has_flag("wrong_search_context"):
             extra_hint = ""
             if result.has_flag("wrong_item") and result.has_flag("cart_verified"):
@@ -693,7 +745,7 @@ async def _build_graph(deps: AgentDeps):
                 )
                 if deps.memory.advance_checkpoint():
                     deps.memory.add("checkpoint", f"advanced to: {deps.memory.current_checkpoint()}")
-                return {"include_planner": False}
+                return {"include_planner": False, "needs_hard_restart": False}
         current_page_mode = infer_page_mode(
             current_url=page_state.get("url", ""),
             page_text=page_state.get("body_text", ""),
@@ -709,6 +761,7 @@ async def _build_graph(deps: AgentDeps):
             back_result = await deps.browser.go_back()
             deps.memory.add("tool_result", back_result)
             deps.log_event("recovery_go_back", result=back_result)
+            needs_hard_restart = True
         checkpoint_text = deps.memory.current_checkpoint()
         checkpoint_lower = checkpoint_text.lower()
         checkpoint_is_address = any(t in checkpoint_lower for t in ("адрес", "достав", "address"))
@@ -720,7 +773,7 @@ async def _build_graph(deps: AgentDeps):
                 deps.log_event("address_auto_advanced", checkpoint=checkpoint_text)
                 if deps.memory.advance_checkpoint():
                     deps.memory.add("checkpoint", f"advanced to: {deps.memory.current_checkpoint()}")
-                return {"include_planner": False}
+                return {"include_planner": False, "needs_hard_restart": False}
         if should_soft_accept_address(checkpoint_text=checkpoint_text, current_url=current_url, result=result):
             deps.memory.add("checkpoint", f"soft-accepted: {checkpoint_text}")
             deps.memory.reset_checkpoint_repeat()
@@ -734,7 +787,50 @@ async def _build_graph(deps: AgentDeps):
             deps.memory.replace_with_summary(summary)
             deps.log_event("context_compacted", reason="recover", summary=summary)
             deps.console.print(Panel(summary, title="Memory Summary", border_style="cyan"))
-        return {"include_planner": False}
+        return {"include_planner": False, "needs_hard_restart": needs_hard_restart}
+
+    async def recover_light(state: AgentState) -> AgentState:
+        """Send recovery instruction into the existing LLM chain (no full restart)."""
+        correction = deps.memory.progress_note or "Continue with the current checkpoint."
+        cp_hint = deps.memory.current_checkpoint() or ""
+        recovery_text = (
+            f"RECOVERY: {correction}\n"
+            f'Current checkpoint: "{cp_hint}".\n'
+            "Take a fresh screenshot, inspect the page, and perform concrete actions to fix the issue. "
+            "Do NOT call done()."
+        )
+        deps.console.print(f"  [dim]Light recovery (keeping LLM context)...[/dim]")
+        deps.log_event("recover_light", message=recovery_text[:200])
+        try:
+            prev_response = state.get("response")
+            pending_outputs: list[dict[str, Any]] = []
+            if prev_response:
+                for item in prev_response.output:
+                    if item.type == "computer_call":
+                        call_id = getattr(item, "call_id", None) or getattr(item, "id", None)
+                        if call_id:
+                            pending_outputs.append({
+                                "type": "computer_call_output",
+                                "call_id": call_id,
+                                "output": {"type": "computer_screenshot", "image_url": await deps.browser.screenshot()},
+                            })
+                    elif item.type == "function_call":
+                        call_id = getattr(item, "call_id", None)
+                        if call_id:
+                            pending_outputs.append({
+                                "type": "function_call_output",
+                                "call_id": call_id,
+                                "output": f"[Recovery] {recovery_text}",
+                            })
+            if pending_outputs:
+                response = await deps.llm.send_tool_outputs(state["response_id"], pending_outputs)
+            else:
+                response = await deps.llm.send_text_input(state["response_id"], recovery_text)
+            return {"response": response, "response_id": response.id, "step": state["step"] + 1, "consecutive_stalls": 0}
+        except Exception as exc:
+            deps.console.print(f"  [yellow]Light recovery failed ({exc}), falling back to full restart.[/yellow]")
+            deps.log_event("recover_light_failed", error=str(exc))
+            return {"needs_hard_restart": True}
 
     async def finish(state: AgentState) -> AgentState:
         return state
@@ -783,14 +879,16 @@ async def _build_graph(deps: AgentDeps):
         if state.get("completed_successfully"):
             return "finish"
         result = state["evaluation"]
+        if result.status == "OK" and result.has_flag("ready_to_finish"):
+            deps.log_event("route_finalize", reason="evaluator_ready_to_finish")
+            return "finalize_success"
+        if result.status == "OK" and result.has_flag("cart_verified") and deps.task_kind == "delivery":
+            deps.log_event("route_finalize", reason="cart_verified_shortcut")
+            return "finalize_success"
         if result.is_complete:
             deps.memory.reset_checkpoint_repeat()
-            # As soon as the evaluator says we're done, finalize — do not advance through
-            # remaining checkpoint labels (wastes steps and often causes stall loops).
-            if result.status == "OK" and result.has_flag("ready_to_finish"):
-                deps.log_event("route_finalize", reason="evaluator_ready_to_finish")
-                return "finalize_success"
-            if deps.memory.advance_checkpoint():
+            advanced = deps.memory.advance_checkpoint()
+            if advanced:
                 deps.memory.add("checkpoint", f"advanced to: {deps.memory.current_checkpoint()}")
                 return "classify"
             if result.status == "OK" and _current_checkpoint_is_last(deps.memory):
@@ -809,6 +907,24 @@ async def _build_graph(deps: AgentDeps):
             cart = {}
 
         if deps.task_kind == "delivery":
+            if deps.profile.restaurant:
+                current_url = page_state.get("url", "")
+                body_text = page_state.get("body_text", "")
+                restaurant_visible = text_matches_target(
+                    f"{current_url} {body_text}".lower(),
+                    deps.profile.restaurant.lower(),
+                )
+                if not restaurant_visible:
+                    retries = state.get("finalize_retries", 0)
+                    reason = f"wrong restaurant: expected '{deps.profile.restaurant}' but not found on current page"
+                    deps.log_event("finalize_rejected_restaurant", reason=reason, url=current_url)
+                    deps.console.print(f"  [yellow]Wrong restaurant — sending agent to fix.[/yellow]")
+                    deps.memory.update_progress(
+                        f"FINALIZE REJECTED: {reason}. "
+                        f"You are NOT inside the correct restaurant. Go back, search for '{deps.profile.restaurant}', "
+                        f"open it, and add the correct items from that restaurant."
+                    )
+                    return {"finalize_retries": retries + 1, "finalize_rejected": True, "done_verified": False}
             items = cart.get("items", []) if isinstance(cart.get("items", []), list) else []
             exact_ok, exact_reason = _cart_exact_match(deps.profile, cart)
             if not exact_ok and not items:
@@ -827,7 +943,7 @@ async def _build_graph(deps: AgentDeps):
                         "Open the cart and REMOVE every item that the user did NOT request. "
                         "Use the cart's own remove/delete/minus controls. Do NOT add anything new."
                     )
-                    return {"finalize_retries": retries + 1, "finalize_rejected": True}
+                    return {"finalize_retries": retries + 1, "finalize_rejected": True, "done_verified": False}
                 return {"stop_reason": f"Final verification failed: {exact_reason}."}
             # cart_snapshot is text-heuristic and may contain menu/category noise.
             # For the final message, only report items that match the user's requested entities.
@@ -886,6 +1002,7 @@ async def _build_graph(deps: AgentDeps):
     graph.add_node("handle_computer", handle_computer)
     graph.add_node("evaluate", evaluate)
     graph.add_node("recover", recover)
+    graph.add_node("recover_light", recover_light)
     graph.add_node("finalize_success", finalize_success)
     graph.add_node("handle_functions", handle_functions)
     graph.add_node("nudge", nudge)
@@ -909,7 +1026,21 @@ async def _build_graph(deps: AgentDeps):
     )
     graph.add_conditional_edges("handle_computer", route_after_computer, {"evaluate": "evaluate", "classify": "classify", "finish": "finish"})
     graph.add_conditional_edges("evaluate", route_after_evaluate, {"recover": "recover", "classify": "classify", "finalize_success": "finalize_success", "finish": "finish"})
-    graph.add_edge("recover", "start_executor")
+
+    def route_after_recover(state: AgentState) -> str:
+        if state.get("needs_hard_restart", False):
+            return "start_executor"
+        if not state.get("response_id"):
+            return "start_executor"
+        return "recover_light"
+
+    graph.add_conditional_edges("recover", route_after_recover, {"start_executor": "start_executor", "recover_light": "recover_light"})
+    def route_after_recover_light(state: AgentState) -> str:
+        if state.get("needs_hard_restart", False):
+            return "start_executor"
+        return "classify"
+
+    graph.add_conditional_edges("recover_light", route_after_recover_light, {"start_executor": "start_executor", "classify": "classify"})
     def route_after_finalize(state: AgentState) -> str:
         if state.get("finalize_rejected"):
             state["finalize_rejected"] = False
@@ -923,7 +1054,15 @@ async def _build_graph(deps: AgentDeps):
     return graph.compile(debug=False, name="browser-agent")
 
 
-async def _process_function_call(fc: Any, state: AgentState, deps: AgentDeps, done_verified: bool, step: int) -> tuple[bool, str, bool, str]:
+async def _process_function_call(
+    fc: Any,
+    state: AgentState,
+    deps: AgentDeps,
+    done_verified: bool,
+    step: int,
+    *,
+    cached_page_state: dict[str, Any] | None = None,
+) -> tuple[bool, str, bool, str]:
     try:
         args = json.loads(fc.arguments) if fc.arguments else {}
     except Exception:
@@ -933,7 +1072,10 @@ async def _process_function_call(fc: Any, state: AgentState, deps: AgentDeps, do
     deps.console.print(f"  [bold]Step {step}/{state['step_limit']}[/bold] [magenta]{name}[/magenta]({args_str})")
     deps.memory.add("tool", f"{name}({args_str})")
     deps.log_event("tool_called", name=name, args=args)
-    page_state = _parse_page_state(await deps.browser.inspect_state())
+    if cached_page_state is not None:
+        page_state = cached_page_state
+    else:
+        page_state = _parse_page_state(await deps.browser.inspect_state())
     page_mode = infer_page_mode(
         current_url=page_state.get("url", ""),
         page_text=page_state.get("body_text", ""),
@@ -967,6 +1109,10 @@ async def _process_function_call(fc: Any, state: AgentState, deps: AgentDeps, do
         answer = Prompt.ask("[bold]Your answer[/bold]")
         deps.memory.add("user", answer)
         deps.log_event("user_prompt", question=question, answer=answer)
+        stop_markers = ("заверш", "останов", "хватит", "стоп", "stop", "finish", "enough", "прекрат", "закончи", "завершай")
+        if any(m in answer.lower() for m in stop_markers):
+            deps.memory.user_requested_stop = True
+            deps.log_event("user_requested_stop", answer=answer)
         return False, "", done_verified, f"User replied: {answer}"
     _DONE_COOLDOWN_STEPS = 5
 
@@ -974,10 +1120,15 @@ async def _process_function_call(fc: Any, state: AgentState, deps: AgentDeps, do
         if set_cooldown:
             deps.memory.done_cooldown_until_step = step + _DONE_COOLDOWN_STEPS
         deps.memory.add("tool_result", rejection)
+        deps.console.print(f"  [yellow]-> {rejection[:200]}[/yellow]")
         return False, "", False, rejection
 
     if name == "done":
         msg = args.get("message", "(task complete)")
+        if deps.memory.user_requested_stop:
+            deps.log_event("done_user_stop", message=msg)
+            deps.console.print(f"  [green]-> done() accepted (user requested stop)[/green]")
+            return True, msg, done_verified, "Confirmed (user requested stop)."
         if step < deps.memory.done_cooldown_until_step:
             current_cp = deps.memory.current_checkpoint() or ""
             rejection = (
@@ -1025,6 +1176,27 @@ async def _process_function_call(fc: Any, state: AgentState, deps: AgentDeps, do
             deps.log_event("done_confirmed", message=msg)
             return True, msg, done_verified, "Confirmed."
         if done_verified and not _done_gate_satisfied(deps.memory):
+            if deps.task_kind == "delivery":
+                try:
+                    cart = json.loads(await deps.browser.cart_snapshot())
+                    cart_ok, _ = _cart_exact_match(deps.profile, cart)
+                    if cart_ok:
+                        ps = cached_page_state or _parse_page_state(await deps.browser.inspect_state())
+                        if deps.profile.restaurant and not text_matches_target(
+                            f"{ps.get('url', '')} {ps.get('body_text', '')}".lower(),
+                            deps.profile.restaurant.lower(),
+                        ):
+                            return _reject_done(
+                                f"done() REJECTED — cart items match but you are in the WRONG restaurant. "
+                                f"Expected: '{deps.profile.restaurant}'. Go back, find the correct restaurant, and order from there."
+                            )
+                        deps.log_event("done_verified_cart_ok", message=msg)
+                        deps.console.print(f"  [green]-> Cart verified, accepting done()[/green]")
+                        while deps.memory.advance_checkpoint():
+                            pass
+                        return True, msg, done_verified, "Confirmed (cart matches task)."
+                except Exception:
+                    pass
             current_cp = deps.memory.current_checkpoint() or "(unknown)"
             total = len(deps.memory.checkpoints) if deps.memory.checkpoints else 0
             idx = deps.memory.active_checkpoint_index + 1
@@ -1047,6 +1219,27 @@ async def _process_function_call(fc: Any, state: AgentState, deps: AgentDeps, do
         idx = deps.memory.active_checkpoint_index + 1
         is_last = _current_checkpoint_is_last(deps.memory)
         if not is_last:
+            if deps.task_kind == "delivery":
+                try:
+                    cart = json.loads(await deps.browser.cart_snapshot())
+                    cart_ok, _ = _cart_exact_match(deps.profile, cart)
+                    if cart_ok:
+                        ps = cached_page_state or _parse_page_state(await deps.browser.inspect_state())
+                        if deps.profile.restaurant and not text_matches_target(
+                            f"{ps.get('url', '')} {ps.get('body_text', '')}".lower(),
+                            deps.profile.restaurant.lower(),
+                        ):
+                            return _reject_done(
+                                f"done() REJECTED — cart items match but you are in the WRONG restaurant. "
+                                f"Expected: '{deps.profile.restaurant}'. Go back, find the correct restaurant, and order from there."
+                            )
+                        deps.log_event("done_early_cart_ok", message=msg, checkpoint=current_cp)
+                        deps.console.print(f"  [green]-> Cart verified, skipping remaining checkpoints[/green]")
+                        while deps.memory.advance_checkpoint():
+                            pass
+                        return True, msg, True, "Confirmed (cart matches task)."
+                except Exception:
+                    pass
             remaining_cps = ""
             if deps.memory.checkpoints:
                 ci = deps.memory.active_checkpoint_index
@@ -1056,19 +1249,23 @@ async def _process_function_call(fc: Any, state: AgentState, deps: AgentDeps, do
             rejection = (
                 f"done() REJECTED — you are only on checkpoint {idx}/{total}: \"{current_cp}\".{remaining_cps} "
                 f"The task has more steps. Do NOT call done(). "
-                f"Continue working on the current checkpoint with concrete browser actions."
+                f"Take a screenshot, then use observe() to find interactive elements for the current checkpoint. "
+                f"Act on what you see — click, type, scroll, or navigate."
             )
             deps.log_event("done_rejected_early", message=msg, checkpoint=current_cp)
             return _reject_done(rejection)
         deps.memory.add("candidate_done", msg)
         deps.log_event("done_candidate", message=msg)
-        return False, "", True, (
+        deps.memory.done_cooldown_until_step = step + _DONE_COOLDOWN_STEPS
+        verification_msg = (
             f"Verify that the task is truly complete: \"{msg}\"\n"
             f"Current checkpoint ({idx}/{total}): \"{current_cp}\".\n"
             "Take a fresh screenshot and check for visible proof.\n"
             "Only call done() again if the final checkpoint is visibly complete and ready to finish.\n"
             "If proof is missing, continue working."
         )
+        deps.console.print(f"  [yellow]-> done() pending verification (cooldown {_DONE_COOLDOWN_STEPS} steps)[/yellow]")
+        return False, "", True, verification_msg
     if name == "search_web":
         current_domain = _normalize_domain(await deps.browser.current_url())
         if not deps.allow_external_search and current_domain and current_domain not in {"google.com", "bing.com", "yandex.ru"}:
@@ -1216,11 +1413,11 @@ async def run_agent_graph(task: str) -> None:
             persist_profile_dir=os.getenv("PERSIST_PROFILE_DIR", ".agent_profile").strip() or ".agent_profile",
             launch_timeout_s=float(os.getenv("BROWSER_LAUNCH_TIMEOUT_S", "20").strip() or "20"),
         )),
-        llm=LLMClient(model=os.getenv("OPENAI_MODEL", "gpt-5.4-mini")),
-        planner=TaskPlanner(LLMClient(model=os.getenv("OPENAI_MODEL", "gpt-5.4-mini"))),
-        checkpoint_planner=CheckpointPlanner(LLMClient(model=os.getenv("OPENAI_MODEL", "gpt-5.4-mini"))),
-        summarizer=HistorySummarizer(LLMClient(model=os.getenv("OPENAI_MODEL", "gpt-5.4-mini"))),
-        evaluator=TaskEvaluator(LLMClient(model=os.getenv("OPENAI_MODEL", "gpt-5.4-mini"))),
+        llm=(executor_llm := LLMClient(model=os.getenv("OPENAI_MODEL", "gpt-5.4-mini"))),
+        planner=TaskPlanner(executor_llm),
+        checkpoint_planner=CheckpointPlanner(executor_llm),
+        summarizer=HistorySummarizer(executor_llm),
+        evaluator=TaskEvaluator(executor_llm),
         memory=TaskMemory(task=task),
         soft_max=int(os.getenv("MAX_STEPS", "60")),
         hard_max=int(os.getenv("HARD_MAX_STEPS", "120")),

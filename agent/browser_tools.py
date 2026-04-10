@@ -256,7 +256,7 @@ class BrowserSession:
             )
         except Exception:
             pass
-        await page.wait_for_timeout(700)
+        await page.wait_for_timeout(350)
 
     # ── Tab management ──
 
@@ -783,6 +783,12 @@ class BrowserSession:
             return items.slice(0, 60);
         }"""
         observed = await page.evaluate(script, goal)
+        for _retry in range(2):
+            if observed:
+                break
+            await page.mouse.wheel(0, 300)
+            await page.wait_for_timeout(600)
+            observed = await page.evaluate(script, goal)
         self._observed_ids = {item["id"] for item in observed}
         self._observed_elements = {item["id"]: item for item in observed}
         payload = {

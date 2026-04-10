@@ -50,6 +50,7 @@ Interaction discipline:
 - In interactive web apps, do not use browser address-bar shortcuts such as Ctrl+L or Alt+D to navigate within the app. Stay inside the visible app UI unless the current page is clearly wrong.
 - In interactive web apps, do not use browser page-find shortcuts such as Ctrl+F unless the page is clearly document-like and has no visible app-level search.
 - Use browser page-find only for document-like pages where there is no visible app-level search field for the target entity.
+- CRITICAL SEARCH ORDER: When the task specifies both a venue/restaurant AND an item, you MUST search for the VENUE FIRST, navigate into it, and only then search for the item inside that venue. Example: "order a cheeseburger from Вкусно и точка" → search "Вкусно и точка", open the restaurant page, THEN find "чизбургер" in its menu. NEVER search for the item name globally — this will show results from multiple restaurants and you will pick the wrong one.
 - Search for one target entity at a time. Do not concatenate multiple product, venue, or query names into one search input unless the page explicitly expects a combined query.
 - After typing into a site search or filter field, you must commit the query before moving on: press Enter via submit_observed_search(element_id), click a visible search/go/apply button, or pick a dropdown result. The runtime tracks this as a pending search commit.
 - Do not call done(), navigate(), go_back(), or search_web() while a search query is still pending commit. Do not clear the search field immediately after typing until you have submitted or picked a result.
@@ -59,6 +60,7 @@ Interaction discipline:
 - If the page shows "nothing found", a footer, a general catalog landing area, or another non-working area, do not keep typing the same query into the same field. First recover to the active content area by going back, closing overlays, or scrolling to the relevant content, then continue.
 - If you need to choose one exact restaurant, product, button, or field among many visible options, prefer observe() followed by click_observed() or type_into_observed() over blind coordinate clicks.
 - When you need a specific item on a page with many similar items (e.g. a menu, catalog, or product list), prefer using a visible search or filter field on that page to narrow results BEFORE scrolling or clicking through cards. This is faster and avoids picking a similar-looking but wrong item.
+- When you land inside a restaurant, store, or catalog page, your FIRST action should be to look for a search or filter input field. If one exists, type the target item name there immediately. Do not scroll through the full menu hoping to spot it manually — search is always faster and more reliable.
 - If the exact item you need is not among the observed elements, do not pick a similar-sounding alternative. Items with similar names are different products. Instead scroll down, use the page's search/filter, or check other categories to find the exact match.
 - Never substitute a different item for the one the user requested. Never ask the user if they want to keep a wrong item or accept an alternative. If the item is not visible, keep searching — scroll, use the page's search field, or browse categories.
 
@@ -84,6 +86,7 @@ Completion:
 - Call done() only after the task has been physically completed in the browser or after you have collected the requested result.
 - The done() message must be concrete and contain the actual outcome, not a plan.
 - Never call done() after partial completion. If the user asked for multiple items, multiple fields, or multiple outputs, do not finish while only some of them are done.
+- If the task says "do not pay", "не оплачивай", "добавь в корзину", or any variant meaning "stop before checkout", you MUST NOT click any checkout, payment, order-confirmation, or "proceed to order" buttons (e.g. "Далее", "Оформить заказ", "К оплате", "Checkout", "Place order"). Once the item is in the cart, verify it and call done() — do not navigate further toward payment.
 
 Task context:
 {task_context}
@@ -174,10 +177,13 @@ Rules:
 - Stay generic. Do not assume site-specific selectors, routes, or hidden product knowledge.
 - Evaluate whether the latest action batch moved the task closer to the user's exact request.
 - Be strict about mismatches in field purpose, selected item identity, quantity, destination, message content, and visible confirmation state.
+- Compare item names character by character. Items with similar but different names are DIFFERENT products (e.g. "Чикенбургер" vs "Чизбургер", "Big Mac" vs "Big King", "Латте" vs "Латте Макиато"). Do not mark cart_verified or ready_to_finish if the visible item name does not match the user's requested item exactly.
 - Mark "dead_end" when the screenshot shows footer, general catalog, empty result, "nothing found", or another clearly non-working area.
 - Mark "actionable_result_visible" when the correct target item is already visible with an add/select action available.
 - Mark "wrong_item" when the cart, draft, or selection contains an item the user did NOT request, even if the requested items are also present. Extra unrequested items must be removed before the task is complete.
 - Mark "ready_to_finish" only when the current checkpoint is complete, ALL items in the cart exactly match the user's request (no missing AND no extra items), and the visible browser state already satisfies the user's requested stopping point.
+- When the task specifies a particular restaurant/store/venue, cart_verified and ready_to_finish require that the agent is INSIDE that specific restaurant. Check the page header, URL, or breadcrumb. If the visible restaurant name does not match the user's request, mark wrong_destination — even if the item name matches.
+- For checkpoints about "logging in" or "entering an account": if the page shows a user profile name, avatar, or account menu, the checkpoint is COMPLETE — the user is already logged in. Do not block on login if the site already shows an authenticated session.
 - Keep evidence and correction short.
 """
 

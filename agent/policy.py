@@ -124,9 +124,22 @@ def infer_task_kind(text: str) -> str:
     return "generic"
 
 
+def _parse_entity_qty(raw: str) -> tuple[str, int]:
+    """Parse "2 чизбургера" → ("чизбургера", 2), "чизбургер" → ("чизбургер", 1)."""
+    m = re.match(r"^(\d+)\s+(.+)$", raw.strip())
+    if m:
+        qty = int(m.group(1))
+        return m.group(2).strip(), max(1, qty)
+    return raw.strip(), 1
+
+
 def extract_requested_entities(task: str, *, task_kind: str) -> list[str]:
+    return [name for name, _ in extract_requested_entities_with_qty(task, task_kind=task_kind)]
+
+
+def extract_requested_entities_with_qty(task: str, *, task_kind: str) -> list[tuple[str, int]]:
     normalized = normalize_text(task)
-    entities: list[str] = []
+    raw_entities: list[str] = []
     if task_kind == "delivery":
         restaurant = extract_target_restaurant(task, task_kind=task_kind)
         patterns = [
@@ -146,20 +159,20 @@ def extract_requested_entities(task: str, *, task_kind: str) -> list[str]:
                     flags=re.IGNORECASE,
                 ).strip(" ,.")
             parts = [part.strip(" ,.") for part in re.split(r"\s+и\s+|,", chunk) if part.strip(" ,.")]
-            entities.extend(parts)
+            raw_entities.extend(parts)
             break
-    deduped: list[str] = []
+    deduped: list[tuple[str, int]] = []
     seen: set[str] = set()
-    for item in entities:
+    for item in raw_entities:
         if len(item) < 3:
             continue
-        clean = re.sub(r"^\d+\s*", "", item).strip()
-        if not clean or len(clean) < 3:
+        name, qty = _parse_entity_qty(item)
+        if not name or len(name) < 3:
             continue
-        if clean in seen:
+        if name in seen:
             continue
-        seen.add(clean)
-        deduped.append(clean)
+        seen.add(name)
+        deduped.append((name, qty))
     return deduped
 
 
@@ -185,12 +198,15 @@ def extract_target_restaurant(task: str, *, task_kind: str) -> str:
 
 def build_task_profile(task: str) -> TaskProfile:
     kind = infer_task_kind(task)
-    return TaskProfile(
+    entities_with_qty = extract_requested_entities_with_qty(task, task_kind=kind)
+    profile = TaskProfile(
         kind=kind,
         domains=infer_task_domains(task),
         restaurant=extract_target_restaurant(task, task_kind=kind),
-        requested_entities=extract_requested_entities(task, task_kind=kind),
+        requested_entities=[name for name, _ in entities_with_qty],
     )
+    profile._entities_with_qty = entities_with_qty  # type: ignore[attr-defined]
+    return profile
 
 
 def _tokenize(text: str) -> list[str]:
@@ -555,6 +571,15 @@ def verify_task_completion(
                 return False, f"missing requested entities in visible state: {', '.join(missing[:3])}"
         if "не оплач" in normalize_text(task) and any(word in normalized_text for word in ("оплачено", "оплата прошла")):
             return False, "payment already happened"
+    if task_kind == "mail":
+        blank_markers = ("about:blank", "новая вкладка", "new tab")
+        if any(marker in normalized_text for marker in blank_markers) or len(normalized_text) < 30:
+            return False, "page appears blank or not navigated yet"
+        if not result.has_flag("ready_to_finish"):
+            return False, "evaluator has not set ready_to_finish for mail task"
+    if task_kind == "generic":
+        if not result.has_flag("ready_to_finish"):
+            return False, "evaluator has not set ready_to_finish"
     if not current_checkpoint:
         return True, "checkpoint-free verification passed"
     return True, "verification passed"

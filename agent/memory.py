@@ -30,6 +30,8 @@ class TaskMemory:
     pending_search_body_fp: str = ""
     pending_address_text: str = ""
     done_cooldown_until_step: int = 0
+    recent_click_coords: list[tuple[int, int]] = field(default_factory=list)
+    user_requested_stop: bool = False
 
     def add(self, kind: str, text: str) -> None:
         clean = " ".join(text.split())
