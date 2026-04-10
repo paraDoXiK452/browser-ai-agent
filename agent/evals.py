@@ -6,6 +6,8 @@ from agent.policy import (
     EvaluationResult,
     build_task_profile,
     classify_dead_end,
+    address_tokens_visible,
+    extract_address_tokens,
     extract_requested_entities,
     extract_site_query,
     extract_target_restaurant,
@@ -158,6 +160,23 @@ def run_policy_evals() -> None:
     _assert(
         len(extract_site_query("Сделай что-нибудь интересное")) <= 80,
         "site query fallback should truncate to max 80 chars",
+    )
+
+    addr_tokens = extract_address_tokens("В яндекс еда закажи мне чизбургер на адрес белоглазова 27")
+    _assert("белоглазова" in addr_tokens and "27" in addr_tokens, f"address token extraction failed: {addr_tokens}")
+    _assert(
+        address_tokens_visible(
+            "закажи на адрес белоглазова 27",
+            "Яндекс Еда улица Белоглазова, 27 Доставка",
+        ),
+        "address_tokens_visible should detect address on page",
+    )
+    _assert(
+        not address_tokens_visible(
+            "закажи на адрес белоглазова 27",
+            "Яндекс Еда Главная страница Рестораны",
+        ),
+        "address_tokens_visible should return False when address is not on page",
     )
 
 

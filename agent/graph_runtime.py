@@ -25,6 +25,7 @@ from agent.policy import (
     TaskProfile,
     build_task_profile,
     classify_dead_end,
+    address_tokens_visible,
     extract_requested_entities,
     extract_site_query,
     infer_domain_from_url,
@@ -55,6 +56,7 @@ class AgentState(TypedDict, total=False):
     step: int
     step_limit: int
     consecutive_stalls: int
+    consecutive_screenshots: int
     response: Any
     response_id: str
     computer_call: Any
@@ -359,6 +361,20 @@ async def _build_graph(deps: AgentDeps):
         deps.memory.add("tool_result", result)
         deps.log_event("bootstrap_search", query=query, result=result)
         deps.console.print(f"  [green]-> {result[:120]}[/green]")
+        try:
+            obs_raw = await deps.browser.observe(query)
+            obs_data = json.loads(obs_raw)
+            for el in obs_data.get("elements", []):
+                role = str(el.get("role", "")).lower()
+                label = str(el.get("label", "")).lower()
+                if role in {"a", "link"} and any(t in label for t in query.lower().split() if len(t) >= 3):
+                    click_res = await deps.browser.click_observed(str(el["id"]))
+                    deps.memory.add("tool_result", click_res)
+                    deps.log_event("bootstrap_click_search_result", label=label, result=click_res)
+                    deps.console.print(f"  [green]-> {click_res[:120]}[/green]")
+                    break
+        except Exception:
+            pass
         return {}
 
     async def start_executor(state: AgentState) -> AgentState:
@@ -388,7 +404,7 @@ async def _build_graph(deps: AgentDeps):
             deps.llm.restart_from_context(get_executor_prompt(task_context), task_context, screenshot),
             timeout=90.0,
         )
-        return {"response": response, "response_id": response.id, "screenshot_url": screenshot}
+        return {"response": response, "response_id": response.id, "screenshot_url": screenshot, "consecutive_screenshots": 0}
 
     async def classify(state: AgentState) -> AgentState:
         response = state["response"]
@@ -416,17 +432,23 @@ async def _build_graph(deps: AgentDeps):
         actions = call.actions
         step = state["step"] + 1
         action_descs = []
+        is_screenshot_only = True
         for a in actions:
             if a.type == "click":
                 action_descs.append(f"click({a.x}, {a.y})")
+                is_screenshot_only = False
             elif a.type == "type":
                 action_descs.append(f"type({a.text[:40]!r})")
+                is_screenshot_only = False
             elif a.type == "keypress":
                 action_descs.append(f"keypress({a.keys})")
+                is_screenshot_only = False
             elif a.type == "scroll":
                 action_descs.append(f"scroll({getattr(a, 'scroll_y', 0)})")
+                is_screenshot_only = False
             else:
                 action_descs.append(a.type)
+        consecutive_screenshots = (state.get("consecutive_screenshots", 0) + 1) if is_screenshot_only else 0
         deps.console.print(f"  [bold]Step {step}/{state['step_limit']}[/bold] [cyan]{', '.join(action_descs)}[/cyan]")
         deps.memory.add("actions", ", ".join(action_descs))
         deps.log_event("computer_actions", step=step, actions=action_descs)
@@ -476,6 +498,25 @@ async def _build_graph(deps: AgentDeps):
             "output": {"type": "computer_screenshot", "image_url": screenshot_url, "detail": "original"},
         }]
 
+        screenshot_breaker_threshold = int(os.getenv("SCREENSHOT_LOOP_BREAK", "2"))
+        if consecutive_screenshots >= screenshot_breaker_threshold:
+            deps.console.print(f"  [yellow]Screenshot loop detected ({consecutive_screenshots}x). Injecting observe()...[/yellow]")
+            deps.log_event("screenshot_loop_break", count=consecutive_screenshots)
+            try:
+                goal = deps.memory.current_checkpoint() or state["task"]
+                obs_raw = await deps.browser.observe(goal)
+                obs_summary = _summarize_observation(obs_raw)
+                if obs_summary:
+                    deps.memory.add("tool_result", obs_summary)
+                    deps.memory.update_progress(
+                        f"You have taken {consecutive_screenshots} consecutive screenshots without acting. "
+                        f"Stop taking screenshots. Use observe() or click_observed() to interact with the page. "
+                        f"Here are the available elements:\n{obs_summary}"
+                    )
+            except Exception:
+                pass
+            consecutive_screenshots = 0
+
         function_calls = state.get("function_calls", [])
         completed_successfully = False
         finished_message = ""
@@ -499,6 +540,7 @@ async def _build_graph(deps: AgentDeps):
             "recent_actions": action_descs,
             "done_verified": done_verified,
             "consecutive_stalls": 0,
+            "consecutive_screenshots": consecutive_screenshots,
         }
 
     async def evaluate(state: AgentState) -> AgentState:
@@ -603,14 +645,26 @@ async def _build_graph(deps: AgentDeps):
             back_result = await deps.browser.go_back()
             deps.memory.add("tool_result", back_result)
             deps.log_event("recovery_go_back", result=back_result)
-        if should_soft_accept_address(checkpoint_text=deps.memory.current_checkpoint(), current_url=current_url, result=result):
-            deps.memory.add("checkpoint", f"soft-accepted: {deps.memory.current_checkpoint()}")
+        checkpoint_text = deps.memory.current_checkpoint()
+        checkpoint_lower = checkpoint_text.lower()
+        checkpoint_is_address = any(t in checkpoint_lower for t in ("адрес", "достав", "address"))
+        if checkpoint_is_address and task_has_explicit_address(deps.memory.task):
+            body_text = str(page_state.get("body_text", "")).lower()
+            if address_tokens_visible(deps.memory.task, body_text):
+                deps.memory.add("checkpoint", f"address auto-accepted (visible on page): {checkpoint_text}")
+                deps.memory.reset_checkpoint_repeat()
+                deps.log_event("address_auto_advanced", checkpoint=checkpoint_text)
+                if deps.memory.advance_checkpoint():
+                    deps.memory.add("checkpoint", f"advanced to: {deps.memory.current_checkpoint()}")
+                return {"include_planner": False}
+        if should_soft_accept_address(checkpoint_text=checkpoint_text, current_url=current_url, result=result):
+            deps.memory.add("checkpoint", f"soft-accepted: {checkpoint_text}")
             deps.memory.reset_checkpoint_repeat()
             if deps.memory.advance_checkpoint():
                 deps.memory.add("checkpoint", f"advanced to: {deps.memory.current_checkpoint()}")
         else:
             repeat_count = deps.memory.note_checkpoint_repeat()
-            deps.log_event("checkpoint_repeat", checkpoint=deps.memory.current_checkpoint(), count=repeat_count)
+            deps.log_event("checkpoint_repeat", checkpoint=checkpoint_text, count=repeat_count)
         if deps.memory.should_compact(deps.compact_every):
             summary = await deps.summarizer.summarize(deps.memory.task_context())
             deps.memory.replace_with_summary(summary)

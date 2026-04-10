@@ -470,6 +470,32 @@ def task_has_explicit_address(text: str) -> bool:
     return has_word and has_number
 
 
+def extract_address_tokens(text: str) -> list[str]:
+    """Extract meaningful address tokens (street name fragments, house numbers) from task text."""
+    normalized = normalize_text(text)
+    match = re.search(
+        r"(?:на адрес|адрес|по адресу|доставить на|доставка на)\s+(.+?)(?:,|\s+добав|\s+закаж|\s+оформ|\s+но |\s+и (?:не )|$)",
+        normalized,
+    )
+    if not match:
+        match = re.search(r"на\s+([а-яё]+\s+\d+[а-яё/\-]*)", normalized)
+    if not match:
+        return []
+    raw = match.group(1).strip(" ,.")
+    tokens = [t for t in re.split(r"[\s,]+", raw) if len(t) >= 2]
+    return tokens
+
+
+def address_tokens_visible(task: str, page_text: str) -> bool:
+    """Check if address tokens from the task are visible in page text."""
+    tokens = extract_address_tokens(task)
+    if not tokens:
+        return False
+    page_lower = normalize_text(page_text)
+    hits = sum(1 for t in tokens if t in page_lower)
+    return hits >= max(1, len(tokens) - 1)
+
+
 def verify_task_completion(
     *,
     task: str,
