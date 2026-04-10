@@ -594,7 +594,8 @@ async def _build_graph(deps: AgentDeps):
         deps.console.print(f"  [dim]No actions, nudging model to continue (stall #{stalls})...[/dim]")
         deps.memory.add("stall", f"stall #{stalls}")
         deps.log_event("stall", count=stalls)
-        response = await deps.llm.nudge(state["response_id"], severity=stalls)
+        cp_hint = deps.memory.current_checkpoint() or ""
+        response = await deps.llm.nudge(state["response_id"], severity=stalls, checkpoint_hint=cp_hint)
         return {"response": response, "response_id": response.id, "consecutive_stalls": stalls, "step": state["step"] + 1}
 
     async def recover(state: AgentState) -> AgentState:
@@ -977,18 +978,48 @@ async def _process_function_call(fc: Any, state: AgentState, deps: AgentDeps, do
             deps.log_event("done_confirmed", message=msg)
             return True, msg, done_verified, "Confirmed."
         if done_verified and not _done_gate_satisfied(deps.memory):
+            current_cp = deps.memory.current_checkpoint() or "(unknown)"
+            total = len(deps.memory.checkpoints) if deps.memory.checkpoints else 0
+            idx = deps.memory.active_checkpoint_index + 1
+            remaining_cps = ""
+            if deps.memory.checkpoints:
+                ci = deps.memory.active_checkpoint_index
+                remaining_list = deps.memory.checkpoints[ci:]
+                if remaining_list:
+                    remaining_cps = " Remaining checkpoints: " + "; ".join(remaining_list[:4]) + "."
             rejection = (
-                "done() rejected. The task is not yet proven complete. "
-                "Do not finish while any requested item, recipient, destination, or stopping condition is still unverified. "
-                "Continue working and wait for an evaluator result that marks the final checkpoint COMPLETE and ready_to_finish."
+                f"done() REJECTED — task is NOT complete. "
+                f"You are on checkpoint {idx}/{total}: \"{current_cp}\".{remaining_cps} "
+                f"Complete the current checkpoint first by performing concrete browser actions, "
+                f"then proceed to the next ones. Do not call done() until ALL checkpoints are finished."
             )
             deps.memory.add("tool_result", rejection)
             deps.log_event("done_rejected", message=msg, reason="gate_not_satisfied")
+            return False, "", False, rejection
+        current_cp = deps.memory.current_checkpoint() or "(unknown)"
+        total = len(deps.memory.checkpoints) if deps.memory.checkpoints else 0
+        idx = deps.memory.active_checkpoint_index + 1
+        is_last = _current_checkpoint_is_last(deps.memory)
+        if not is_last:
+            remaining_cps = ""
+            if deps.memory.checkpoints:
+                ci = deps.memory.active_checkpoint_index
+                remaining_list = deps.memory.checkpoints[ci:]
+                if remaining_list:
+                    remaining_cps = " Remaining: " + "; ".join(remaining_list[:4]) + "."
+            rejection = (
+                f"done() REJECTED — you are only on checkpoint {idx}/{total}: \"{current_cp}\".{remaining_cps} "
+                f"The task has more steps. Do NOT call done(). "
+                f"Continue working on the current checkpoint with concrete browser actions."
+            )
+            deps.memory.add("tool_result", rejection)
+            deps.log_event("done_rejected_early", message=msg, checkpoint=current_cp)
             return False, "", False, rejection
         deps.memory.add("candidate_done", msg)
         deps.log_event("done_candidate", message=msg)
         return False, "", True, (
             f"Verify that the task is truly complete: \"{msg}\"\n"
+            f"Current checkpoint ({idx}/{total}): \"{current_cp}\".\n"
             "Take a fresh screenshot and check for visible proof.\n"
             "Only call done() again if the final checkpoint is visibly complete and ready to finish.\n"
             "If proof is missing, continue working."

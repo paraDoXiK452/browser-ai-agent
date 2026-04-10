@@ -88,19 +88,23 @@ class LLMClient:
             input=outputs,
         ))
 
-    async def nudge(self, prev_response_id: str, severity: int = 1) -> Any:
+    async def nudge(self, prev_response_id: str, severity: int = 1, *, checkpoint_hint: str = "") -> Any:
+        cp_note = f' Current checkpoint: "{checkpoint_hint}".' if checkpoint_hint else ""
         if severity >= 2:
             msg = (
-                "You have stalled multiple times. "
-                "Recover generically: take a fresh screenshot, inspect the visible page, "
+                "You have stalled multiple times.{cp}"
+                " Recover generically: take a fresh screenshot, inspect the visible page, "
                 "then do one concrete next action. Prefer one of: scroll, open a visible menu, "
-                "focus a visible search or input field, go back, or navigate only if the current page is clearly wrong."
-            )
+                "focus a visible search or input field, go back, or navigate only if the current page is clearly wrong. "
+                "Do NOT call done() — complete the current checkpoint first."
+            ).format(cp=cp_note)
         else:
             msg = (
-                "Stop describing plans. Take a fresh screenshot, inspect the page, and continue with concrete browser actions. "
-                "Prefer a short safe batch of 2 to 4 related actions when the UI is obvious, but after typing into a field or changing page state, verify before continuing."
-            )
+                "Stop describing plans.{cp}"
+                " Take a fresh screenshot, inspect the page, and continue with concrete browser actions. "
+                "Prefer a short safe batch of 2 to 4 related actions when the UI is obvious, but after typing into a field or changing page state, verify before continuing. "
+                "Do NOT call done() until all checkpoints are complete."
+            ).format(cp=cp_note)
         return await _call_with_retry(lambda: self.client.responses.create(
             model=self.model,
             previous_response_id=prev_response_id,
