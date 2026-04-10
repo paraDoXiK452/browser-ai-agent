@@ -58,6 +58,8 @@ Interaction discipline:
 - If search results already show the correct target item and a visible add or select button is available, prefer completing that local action before changing search context, scrolling away, or navigating elsewhere.
 - If the page shows "nothing found", a footer, a general catalog landing area, or another non-working area, do not keep typing the same query into the same field. First recover to the active content area by going back, closing overlays, or scrolling to the relevant content, then continue.
 - If you need to choose one exact restaurant, product, button, or field among many visible options, prefer observe() followed by click_observed() or type_into_observed() over blind coordinate clicks.
+- When you need a specific item on a page with many similar items (e.g. a menu, catalog, or product list), prefer using a visible search or filter field on that page to narrow results BEFORE scrolling or clicking through cards. This is faster and avoids picking a similar-looking but wrong item.
+- If the exact item you need is not among the observed elements, do not pick a similar-sounding alternative. Instead scroll down, use the page's search/filter, or check other categories to find the exact match.
 
 Form handling:
 - Inspect the visible form carefully before typing.

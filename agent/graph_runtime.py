@@ -271,7 +271,7 @@ def _cart_exact_match(profile: TaskProfile, cart: dict[str, Any]) -> tuple[bool,
     return True, "all requested items matched in cart snapshot"
 
 
-def _summarize_observation(raw: str, limit: int = 12) -> str:
+def _summarize_observation(raw: str, limit: int = 20) -> str:
     try:
         data = json.loads(raw)
     except Exception:
@@ -292,6 +292,9 @@ def _summarize_observation(raw: str, limit: int = 12) -> str:
         header += f"\nURL: {url}"
     if goal:
         header += f"\nGoal hint: {goal}"
+    header += f"\nShowing {len(lines)} of {len(elements)} interactive elements on screen."
+    if len(elements) > limit:
+        header += f" {len(elements) - limit} more elements available — scroll down or use page search to find items not listed."
     return f"{header}\n" + "\n".join(lines)
 
 
@@ -625,14 +628,16 @@ async def _build_graph(deps: AgentDeps):
                 except Exception:
                     pass
             deps.memory.update_progress(
-                "A wrong-item modal was closed. Now use observe() to find the correct item and click it."
+                "A wrong-item overlay was closed. "
+                "The item you clicked was NOT the correct one — do not pick similar-sounding alternatives. "
+                "Use the page's search/filter field to find the exact item, or scroll to discover more options."
             )
             return {"include_planner": False}
         if result.has_flag("wrong_destination") or result.has_flag("wrong_item") or result.has_flag("wrong_search_context"):
             deps.memory.update_progress(
-                "Recovery policy: first try local correction inside the current app. "
-                "Close overlays, clear search context, or reopen the correct menu before using go_back(). "
-                "Then use observe() to identify the exact visible restaurant, product, or field before clicking or typing."
+                "Recovery: you selected the WRONG item/destination. Do not pick similar-looking alternatives. "
+                "Close any overlays, then use the page's own search or filter field to find the exact target. "
+                "If no search field exists, scroll to see more options. Use observe() before clicking."
             )
         if (
             task_uses_current_address(deps.memory.task)
