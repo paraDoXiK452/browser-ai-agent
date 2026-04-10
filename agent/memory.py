@@ -29,6 +29,7 @@ class TaskMemory:
     pending_search_url_snapshot: str = ""
     pending_search_body_fp: str = ""
     pending_address_text: str = ""
+    done_cooldown_until_step: int = 0
 
     def add(self, kind: str, text: str) -> None:
         clean = " ".join(text.split())

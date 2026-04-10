@@ -96,15 +96,21 @@ def extract_site_query(text: str) -> str:
         normalized,
     )
     if match:
-        return match.group(1).strip()
+        return _clean_site_query(match.group(1))
     match = re.search(
         r"(?:откр\w{0,6}|зайд\w{0,4}|перейд\w{0,4})\s+(?:в\s+|на\s+)?"
         r"([a-zа-яё][a-zа-яё0-9 .\-]{2,40}?)(?:\s|,|$)",
         normalized,
     )
     if match:
-        return match.group(1).strip()
+        return _clean_site_query(match.group(1))
     return text.strip()[:80]
+
+
+def _clean_site_query(raw: str) -> str:
+    result = raw.strip()
+    result = re.sub(r"\s+(?:и|или|а|но|да|то|в|на|из|с)\s*$", "", result).strip()
+    return result or raw.strip()
 
 
 def infer_task_kind(text: str) -> str:

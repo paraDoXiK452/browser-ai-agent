@@ -948,8 +948,26 @@ async def _process_function_call(fc: Any, state: AgentState, deps: AgentDeps, do
         deps.memory.add("user", answer)
         deps.log_event("user_prompt", question=question, answer=answer)
         return False, "", done_verified, f"User replied: {answer}"
+    _DONE_COOLDOWN_STEPS = 5
+
+    def _reject_done(rejection: str, *, set_cooldown: bool = True) -> tuple[bool, str, bool, str]:
+        if set_cooldown:
+            deps.memory.done_cooldown_until_step = step + _DONE_COOLDOWN_STEPS
+        deps.memory.add("tool_result", rejection)
+        return False, "", False, rejection
+
     if name == "done":
         msg = args.get("message", "(task complete)")
+        if step < deps.memory.done_cooldown_until_step:
+            current_cp = deps.memory.current_checkpoint() or ""
+            rejection = (
+                f"done() BLOCKED — you called done() too recently and it was rejected. "
+                f"Cooldown until step {deps.memory.done_cooldown_until_step}. "
+                f"Current checkpoint: \"{current_cp}\". "
+                "Perform concrete browser actions to make progress. Do NOT call done()."
+            )
+            deps.log_event("done_cooldown", step=step, cooldown_until=deps.memory.done_cooldown_until_step)
+            return _reject_done(rejection, set_cooldown=False)
         current_url = await deps.browser.current_url()
         login_markers = ("passport", "login", "signin", "auth", "accounts.google", "account.live")
         if any(marker in (current_url or "").lower() for marker in login_markers):
@@ -959,18 +977,16 @@ async def _process_function_call(fc: Any, state: AgentState, deps: AgentDeps, do
                 "Use ask_user() to tell the user: explain that you need them to log in manually in the browser, "
                 "then press Enter in the console when done. Do NOT call done() from a login page."
             )
-            deps.memory.add("tool_result", rejection)
             deps.log_event("done_rejected_login_page", message=msg, url=current_url)
-            return False, "", False, rejection
+            return _reject_done(rejection, set_cooldown=False)
         if deps.memory.has_uncommitted_search():
             rejection = (
                 "done() rejected. A search-like field has a typed query that was not committed yet. "
                 "Use submit_observed_search on that field, click a visible search/go/suggestion control, "
                 "or wait until the results page is visibly loaded before finishing."
             )
-            deps.memory.add("tool_result", rejection)
             deps.log_event("done_rejected", message=msg, reason="uncommitted_search")
-            return False, "", False, rejection
+            return _reject_done(rejection)
         if done_verified and _done_gate_satisfied(deps.memory):
             page_state = _parse_page_state(await deps.browser.inspect_state())
             completion_ok, reason = verify_task_completion(
@@ -984,9 +1000,8 @@ async def _process_function_call(fc: Any, state: AgentState, deps: AgentDeps, do
             )
             if not completion_ok:
                 rejection = f"done() rejected. Deterministic verification failed: {reason}."
-                deps.memory.add("tool_result", rejection)
                 deps.log_event("done_rejected", message=msg, reason=reason, page_state=page_state)
-                return False, "", False, rejection
+                return _reject_done(rejection)
             deps.log_event("done_confirmed", message=msg)
             return True, msg, done_verified, "Confirmed."
         if done_verified and not _done_gate_satisfied(deps.memory):
@@ -1005,9 +1020,8 @@ async def _process_function_call(fc: Any, state: AgentState, deps: AgentDeps, do
                 f"Complete the current checkpoint first by performing concrete browser actions, "
                 f"then proceed to the next ones. Do not call done() until ALL checkpoints are finished."
             )
-            deps.memory.add("tool_result", rejection)
             deps.log_event("done_rejected", message=msg, reason="gate_not_satisfied")
-            return False, "", False, rejection
+            return _reject_done(rejection)
         current_cp = deps.memory.current_checkpoint() or "(unknown)"
         total = len(deps.memory.checkpoints) if deps.memory.checkpoints else 0
         idx = deps.memory.active_checkpoint_index + 1
@@ -1024,9 +1038,8 @@ async def _process_function_call(fc: Any, state: AgentState, deps: AgentDeps, do
                 f"The task has more steps. Do NOT call done(). "
                 f"Continue working on the current checkpoint with concrete browser actions."
             )
-            deps.memory.add("tool_result", rejection)
             deps.log_event("done_rejected_early", message=msg, checkpoint=current_cp)
-            return False, "", False, rejection
+            return _reject_done(rejection)
         deps.memory.add("candidate_done", msg)
         deps.log_event("done_candidate", message=msg)
         return False, "", True, (

@@ -181,6 +181,10 @@ def run_policy_evals() -> None:
         "site query extraction failed for mail task",
     )
     _assert(
+        extract_site_query("Прочитай последние 10 писем на яндекс почте и удали спам") == "яндекс почте",
+        "site query should strip trailing conjunction 'и'",
+    )
+    _assert(
         len(extract_site_query("Сделай что-нибудь интересное")) <= 80,
         "site query fallback should truncate to max 80 chars",
     )
