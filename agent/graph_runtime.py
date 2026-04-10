@@ -71,6 +71,8 @@ class AgentState(TypedDict, total=False):
     finished_message: str
     stop_reason: str
     include_planner: bool
+    finalize_retries: int
+    finalize_rejected: bool
 
 
 @dataclass
@@ -158,7 +160,7 @@ def _last_eval_signals_finish(memory: TaskMemory) -> bool:
     result = parse_evaluation(memory.last_evaluation)
     if result.status == "OK" and result.checkpoint_state == "COMPLETE" and result.has_flag("ready_to_finish"):
         return True
-    if result.status == "OK" and result.has_flag("cart_verified"):
+    if result.status == "OK" and result.has_flag("cart_verified") and not result.has_flag("wrong_item"):
         return True
     return False
 
@@ -273,6 +275,9 @@ def _cart_exact_match(profile: TaskProfile, cart: dict[str, Any]) -> tuple[bool,
                 i += 1
         if need > 0:
             return False, f"missing requested item in cart snapshot: {expected_name} x{expected_qty}"
+    if remaining:
+        extra_names = [name for name, _ in remaining]
+        return False, f"cart contains extra items not requested by the user: {', '.join(extra_names[:3])}. Remove them before finishing."
     return True, "all requested items matched in cart snapshot"
 
 
@@ -647,10 +652,18 @@ async def _build_graph(deps: AgentDeps):
             )
             return {"include_planner": False}
         if result.has_flag("wrong_destination") or result.has_flag("wrong_item") or result.has_flag("wrong_search_context"):
+            extra_hint = ""
+            if result.has_flag("wrong_item") and result.has_flag("cart_verified"):
+                extra_hint = (
+                    " The cart contains items the user did NOT request. "
+                    "Before finishing, REMOVE every extra item from the cart using the cart's own remove/delete/minus controls. "
+                    "Only the user's explicitly requested items must remain."
+                )
             deps.memory.update_progress(
                 "Recovery: you selected the WRONG item/destination. Do not pick similar-looking alternatives. "
                 "Close any overlays, then use the page's own search or filter field to find the exact target. "
                 "If no search field exists, scroll to see more options. Use observe() before clicking."
+                + extra_hint
             )
         if (
             task_uses_current_address(deps.memory.task)
@@ -785,6 +798,15 @@ async def _build_graph(deps: AgentDeps):
                     deps.log_event("finalize_soft_match", reason=exact_reason, cart=cart)
             if not exact_ok:
                 deps.log_event("finalize_rejected", reason=exact_reason, cart=cart, page_state=page_state)
+                retries = state.get("finalize_retries", 0)
+                if retries < 3 and "extra items" in exact_reason:
+                    deps.console.print(f"  [yellow]Cart has extra items — sending agent to clean up.[/yellow]")
+                    deps.memory.update_progress(
+                        f"FINALIZE REJECTED: {exact_reason} "
+                        "Open the cart and REMOVE every item that the user did NOT request. "
+                        "Use the cart's own remove/delete/minus controls. Do NOT add anything new."
+                    )
+                    return {"finalize_retries": retries + 1, "finalize_rejected": True}
                 return {"stop_reason": f"Final verification failed: {exact_reason}."}
             # cart_snapshot is text-heuristic and may contain menu/category noise.
             # For the final message, only report items that match the user's requested entities.
@@ -867,7 +889,13 @@ async def _build_graph(deps: AgentDeps):
     graph.add_conditional_edges("handle_computer", route_after_computer, {"evaluate": "evaluate", "classify": "classify", "finish": "finish"})
     graph.add_conditional_edges("evaluate", route_after_evaluate, {"recover": "recover", "classify": "classify", "finalize_success": "finalize_success", "finish": "finish"})
     graph.add_edge("recover", "start_executor")
-    graph.add_edge("finalize_success", "finish")
+    def route_after_finalize(state: AgentState) -> str:
+        if state.get("finalize_rejected"):
+            state["finalize_rejected"] = False
+            return "start_executor"
+        return "finish"
+
+    graph.add_conditional_edges("finalize_success", route_after_finalize, {"start_executor": "start_executor", "finish": "finish"})
     graph.add_conditional_edges("handle_functions", route_after_functions, {"classify": "classify", "finish": "finish"})
     graph.add_edge("nudge", "classify")
     graph.add_edge("finish", END)

@@ -176,7 +176,8 @@ Rules:
 - Be strict about mismatches in field purpose, selected item identity, quantity, destination, message content, and visible confirmation state.
 - Mark "dead_end" when the screenshot shows footer, general catalog, empty result, "nothing found", or another clearly non-working area.
 - Mark "actionable_result_visible" when the correct target item is already visible with an add/select action available.
-- Mark "ready_to_finish" only when the current checkpoint is complete and the visible browser state already satisfies the user's requested stopping point.
+- Mark "wrong_item" when the cart, draft, or selection contains an item the user did NOT request, even if the requested items are also present. Extra unrequested items must be removed before the task is complete.
+- Mark "ready_to_finish" only when the current checkpoint is complete, ALL items in the cart exactly match the user's request (no missing AND no extra items), and the visible browser state already satisfies the user's requested stopping point.
 - Keep evidence and correction short.
 """
 

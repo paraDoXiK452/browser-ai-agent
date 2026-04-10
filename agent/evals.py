@@ -26,6 +26,7 @@ from agent.policy import (
     should_soft_accept_address,
     verify_task_completion,
 )
+from agent.graph_runtime import _cart_exact_match
 
 
 def _assert(condition: bool, message: str) -> None:
@@ -175,6 +176,15 @@ def run_policy_evals() -> None:
         len(extract_site_query("Сделай что-нибудь интересное")) <= 80,
         "site query fallback should truncate to max 80 chars",
     )
+
+    extra_profile = build_task_profile("В яндекс еде закажи мне чизбургер с вкусно и точка, добавь в корзину но не оплачивай заказ")
+    extra_cart = {"items": [{"name": "Чизбургер", "qty": 1}, {"name": "Соус Сырный", "qty": 1}]}
+    extra_ok, extra_reason = _cart_exact_match(extra_profile, extra_cart)
+    _assert(not extra_ok, f"cart with extra unrequested item should fail: {extra_reason}")
+    _assert("extra items" in extra_reason, f"reason should mention extra items: {extra_reason}")
+    clean_cart = {"items": [{"name": "Чизбургер", "qty": 1}]}
+    clean_ok, clean_reason = _cart_exact_match(extra_profile, clean_cart)
+    _assert(clean_ok, f"clean cart should pass: {clean_reason}")
 
     addr_tokens = extract_address_tokens("В яндекс еда закажи мне чизбургер на адрес белоглазова 27")
     _assert("белоглазова" in addr_tokens and "27" in addr_tokens, f"address token extraction failed: {addr_tokens}")
