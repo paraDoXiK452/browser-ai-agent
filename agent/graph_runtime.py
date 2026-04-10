@@ -404,7 +404,7 @@ async def _build_graph(deps: AgentDeps):
             deps.llm.restart_from_context(get_executor_prompt(task_context), task_context, screenshot),
             timeout=90.0,
         )
-        return {"response": response, "response_id": response.id, "screenshot_url": screenshot, "consecutive_screenshots": 0}
+        return {"response": response, "response_id": response.id, "screenshot_url": screenshot}
 
     async def classify(state: AgentState) -> AgentState:
         response = state["response"]
@@ -610,6 +610,24 @@ async def _build_graph(deps: AgentDeps):
             deps.log_event("dead_end_recovery", checkpoint=deps.memory.current_checkpoint(), note=note)
         else:
             deps.memory.update_progress(result.correction or result.evidence or result.raw)
+        if result.has_flag("wrong_item") and page_state.get("flags", {}).get("modal_visible"):
+            deps.console.print("  [yellow]Wrong item in modal — attempting to close overlay...[/yellow]")
+            dismiss_result = await deps.browser.dismiss_blockers()
+            deps.memory.add("tool_result", dismiss_result)
+            deps.log_event("recovery_close_wrong_item_modal", result=dismiss_result)
+            if "Dismissed" not in dismiss_result:
+                try:
+                    page = await deps.browser._ensure_page()
+                    await page.keyboard.press("Escape")
+                    await page.wait_for_timeout(500)
+                    deps.memory.add("tool_result", "Pressed Escape to close modal")
+                    deps.log_event("recovery_escape_modal")
+                except Exception:
+                    pass
+            deps.memory.update_progress(
+                "A wrong-item modal was closed. Now use observe() to find the correct item and click it."
+            )
+            return {"include_planner": False}
         if result.has_flag("wrong_destination") or result.has_flag("wrong_item") or result.has_flag("wrong_search_context"):
             deps.memory.update_progress(
                 "Recovery policy: first try local correction inside the current app. "
@@ -703,6 +721,10 @@ async def _build_graph(deps: AgentDeps):
                 return "evaluate"
             state["stop_reason"] = "step limit reached"
             return "finish"
+        recent = state.get("recent_actions", [])
+        is_screenshot_only = recent and all(a.strip().lower() == "screenshot" for a in recent)
+        if is_screenshot_only:
+            return "classify"
         return "evaluate"
 
     def route_after_evaluate(state: AgentState) -> str:
