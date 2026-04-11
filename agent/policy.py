@@ -245,6 +245,16 @@ def infer_domain_from_url(url: str) -> str:
     return host[4:] if host.startswith("www.") else host
 
 
+_RESTAURANT_URL_PATTERNS = re.compile(
+    r"/r/|/restaurant/|/place/|/shop/|/store/|placeSlug=|placeId=", re.IGNORECASE,
+)
+
+
+def is_inside_restaurant(url: str) -> bool:
+    """Heuristic: the URL points to a specific restaurant/store page, not a platform landing or search."""
+    return bool(_RESTAURANT_URL_PATTERNS.search(url))
+
+
 def infer_page_mode(*, current_url: str, page_text: str, flags: dict[str, bool] | None = None) -> str:
     flags = flags or {}
     normalized_url = current_url.lower()

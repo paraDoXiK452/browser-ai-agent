@@ -19,6 +19,7 @@ from agent.policy import (
     is_address_commit_control,
     is_address_like_field,
     is_authorization_request,
+    is_inside_restaurant,
     is_probable_restaurant_card,
     is_search_commit_control_click,
     is_search_like_field,
@@ -233,6 +234,12 @@ def run_policy_evals() -> None:
         ),
         "address_tokens_visible should return False when address is not on page",
     )
+
+    _assert(is_inside_restaurant("https://eda.yandex.ru/r/vkusno_i_tochka"), "should detect /r/ restaurant URL")
+    _assert(is_inside_restaurant("https://eda.yandex.ru/restaurant/mcdonalds"), "should detect /restaurant/ URL")
+    _assert(is_inside_restaurant("https://delivery.example.com/place/pizza"), "should detect /place/ URL")
+    _assert(not is_inside_restaurant("https://eda.yandex.ru/Almetyevsk"), "landing page should not be inside restaurant")
+    _assert(not is_inside_restaurant("https://eda.yandex.ru"), "root URL should not be inside restaurant")
 
 
 if __name__ == "__main__":

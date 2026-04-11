@@ -39,6 +39,7 @@ from agent.policy import (
     is_authorization_request,
     is_probable_restaurant_card,
     is_search_commit_control_click,
+    is_inside_restaurant,
     is_search_like_field,
     is_search_suggestion_pick,
     parse_evaluation,
@@ -293,7 +294,13 @@ def _cart_exact_match(profile: TaskProfile, cart: dict[str, Any]) -> tuple[bool,
     return True, "all requested items matched in cart snapshot"
 
 
-def _summarize_observation(raw: str, limit: int = 20, *, target_entities: list[str] | None = None) -> str:
+def _summarize_observation(
+    raw: str,
+    limit: int = 20,
+    *,
+    target_entities: list[str] | None = None,
+    restaurant_name: str = "",
+) -> str:
     try:
         data = json.loads(raw)
     except Exception:
@@ -328,13 +335,26 @@ def _summarize_observation(raw: str, limit: int = 20, *, target_entities: list[s
         missing = [t for t in goal_tokens if not any(t in lab for lab in all_labels)]
         if missing:
             header += f"\nNOTE: No exact match for [{', '.join(missing)}] among visible elements. The target may require scrolling or using the page's search field."
-    if search_field_ids and target_entities:
-        entity_list = ", ".join(target_entities[:3])
-        header += (
-            f"\nSEARCH HINT: A search/filter field is visible (element {search_field_ids[0]}). "
-            f"You are looking for: [{entity_list}]. "
-            f"Use type_into_observed(element_id=\"{search_field_ids[0]}\", text=\"<item name>\") to search directly."
-        )
+    if search_field_ids:
+        inside = is_inside_restaurant(url)
+        if not inside and restaurant_name:
+            header += (
+                f"\nSEARCH HINT: A search/filter field is visible (element {search_field_ids[0]}). "
+                f"You need to find restaurant \"{restaurant_name}\" FIRST. "
+                f"Type the restaurant name into the search field, open the restaurant, then find items inside it."
+            )
+        elif inside and target_entities:
+            entity_list = ", ".join(target_entities[:3])
+            header += (
+                f"\nSEARCH HINT: You are inside a restaurant page. A search/filter field is visible (element {search_field_ids[0]}). "
+                f"Search for: [{entity_list}]."
+            )
+        elif target_entities:
+            entity_list = ", ".join(target_entities[:3])
+            header += (
+                f"\nSEARCH HINT: A search/filter field is visible (element {search_field_ids[0]}). "
+                f"You are looking for: [{entity_list}]."
+            )
     return f"{header}\n" + "\n".join(lines)
 
 
@@ -446,7 +466,11 @@ async def _build_graph(deps: AgentDeps):
             deps.log_event("page_state_error", error=str(exc))
         try:
             observation_raw = await deps.browser.observe(deps.memory.current_checkpoint() or state["task"])
-            observation = _summarize_observation(observation_raw, target_entities=deps.requested_entities)
+            observation = _summarize_observation(
+                observation_raw,
+                target_entities=deps.requested_entities,
+                restaurant_name=deps.profile.restaurant,
+            )
             if observation:
                 deps.log_event("live_observation", observation=observation)
         except Exception as exc:
@@ -456,6 +480,13 @@ async def _build_graph(deps: AgentDeps):
             task_context = f"{task_context}\n\nDeterministic page state:\n{_page_state_summary(page_state)}"
         if observation:
             task_context = f"{task_context}\n\n{observation}"
+        current_url = page_state.get("url", "")
+        if current_url and not current_url.startswith(("about:", "chrome:")):
+            task_context += (
+                f"\n\nIMPORTANT: You are already on {current_url}. "
+                "A screenshot and page observation are attached above. "
+                "Do NOT take another screenshot or navigate to this URL — start working immediately with observe() or concrete actions."
+            )
         response = await asyncio.wait_for(
             deps.llm.restart_from_context(get_executor_prompt(task_context), task_context, screenshot),
             timeout=90.0,
@@ -587,7 +618,11 @@ async def _build_graph(deps: AgentDeps):
             try:
                 goal = deps.memory.current_checkpoint() or state["task"]
                 obs_raw = await deps.browser.observe(goal)
-                obs_summary = _summarize_observation(obs_raw, target_entities=deps.requested_entities)
+                obs_summary = _summarize_observation(
+                    obs_raw,
+                    target_entities=deps.requested_entities,
+                    restaurant_name=deps.profile.restaurant,
+                )
                 if obs_summary:
                     deps.memory.add("tool_result", obs_summary)
                     deps.memory.update_progress(
